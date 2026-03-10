@@ -33,3 +33,8 @@ if (USE_MNNVL)
   add_subdirectory(nvlink_transport)
   target_sources(transport PUBLIC $<TARGET_OBJECTS:nvlink_transport>)
 endif()
+
+if (USE_XGMI)
+  add_subdirectory(xgmi_transport)
+  target_sources(transport PUBLIC $<TARGET_OBJECTS:xgmi_transport>)
+endif()

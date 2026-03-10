@@ -224,6 +224,23 @@ int TransferEngine::init(const std::string &metadata_conn_string,
                 return -1;
             }
         }
+#elif defined(USE_XGMI)
+        if (local_topology_->getHcaList().size() > 0 &&
+            !getenv("MC_FORCE_XGMI")) {
+            Transport *rdma_transport =
+                multi_transports_->installTransport("rdma", local_topology_);
+            if (!rdma_transport) {
+                LOG(ERROR) << "Failed to install RDMA transport";
+                return -1;
+            }
+        } else {
+            Transport *xgmi_transport =
+                multi_transports_->installTransport("xgmi", nullptr);
+            if (!xgmi_transport) {
+                LOG(ERROR) << "Failed to install xGMI transport";
+                return -1;
+            }
+        }
 #else
         if (local_topology_->getHcaList().size() > 0 &&
             !getenv("MC_FORCE_TCP")) {

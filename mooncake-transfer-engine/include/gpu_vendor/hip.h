@@ -67,4 +67,10 @@ const static std::string GPU_PREFIX = "hip:";
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStream_t hipStream_t
+#define cudaErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
+#define cudaIpcMemHandle_t hipIpcMemHandle_t
+#define cudaIpcGetMemHandle hipIpcGetMemHandle
+#define cudaIpcOpenMemHandle hipIpcOpenMemHandle
+#define cudaIpcCloseMemHandle hipIpcCloseMemHandle
+#define cudaIpcMemLazyEnablePeerAccess hipIpcMemLazyEnablePeerAccess
 #define cudaSuccess hipSuccess

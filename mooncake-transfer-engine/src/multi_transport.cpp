@@ -36,6 +36,9 @@
 #ifdef USE_MNNVL
 #include "transport/nvlink_transport/nvlink_transport.h"
 #endif
+#ifdef USE_XGMI
+#include "transport/xgmi_transport/xgmi_transport.h"
+#endif
 #ifdef USE_CXL
 #include "transport/cxl_transport/cxl_transport.h"
 #endif
@@ -230,6 +233,11 @@ Transport *MultiTransport::installTransport(const std::string &proto,
 #ifdef USE_MNNVL
     else if (std::string(proto) == "nvlink") {
         transport = new NvlinkTransport();
+    }
+#endif
+#ifdef USE_XGMI
+    else if (std::string(proto) == "xgmi") {
+        transport = new XgmiTransport();
     }
 #endif
 #ifdef USE_CXL
