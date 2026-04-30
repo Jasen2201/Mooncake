@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "transport/rdma_transport/rdma_transport.h"
+#include <cstdlib>
 
 #include <glog/logging.h>
 #include <sys/mman.h>
@@ -186,6 +187,57 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
                                                bool force_sequential) {
     (void)remote_accessible;
     BufferDesc buffer_desc;
+
+    // ── Auto-chunk (overlapping): split buffers exceeding max_mr_size ──
+    // Adjacent chunks overlap by `overlap` bytes so that any single transfer
+    // slice <= `overlap` is fully contained in at least one BufferDesc, even
+    // if the slice straddles what would otherwise be a chunk boundary.
+    size_t max_mr = (size_t)globalConfig().max_mr_size;
+    if (max_mr > 0 && length > max_mr) {
+        size_t overlap = 64ULL * 1024ULL * 1024ULL;  // default 64 MiB
+        if (const char *env = std::getenv("MC_MR_CHUNK_OVERLAP_BYTES")) {
+            char *endp = nullptr;
+            unsigned long long v = std::strtoull(env, &endp, 0);
+            if (endp && *endp == 0 && v > 0) overlap = (size_t)v;
+        }
+        if (overlap >= max_mr / 2) overlap = max_mr / 2;  // sanity cap
+        size_t step = max_mr - overlap;
+
+        std::vector<void *> chunk_addrs;
+        char *base = static_cast<char *>(addr);
+        size_t pos = 0;
+        size_t num_chunks = 0;
+        while (pos < length) {
+            size_t this_chunk = std::min(max_mr, length - pos);
+            char *p = base + pos;
+            int rc = registerLocalMemoryInternal(p, this_chunk, name,
+                                                 remote_accessible,
+                                                 update_metadata, true);
+            if (rc != 0) {
+                LOG(ERROR) << "Failed to register chunk at " << (void *)p
+                           << " len=" << this_chunk;
+                for (auto *ca : chunk_addrs) {
+                    unregisterLocalMemoryInternal(ca, update_metadata, true);
+                }
+                return rc;
+            }
+            chunk_addrs.push_back(p);
+            num_chunks++;
+            if (pos + this_chunk >= length) break;  // last chunk reached EOB
+            pos += step;
+        }
+        LOG(INFO) << "Buffer length " << length << " exceeds max_mr_size "
+                  << max_mr << ", split into " << num_chunks
+                  << " overlapping chunks (overlap=" << overlap << ")";
+        {
+            std::lock_guard<std::mutex> lock(chunked_registrations_mutex_);
+            chunked_registrations_[(uintptr_t)addr] = std::move(chunk_addrs);
+        }
+        return 0;
+    }
+    // ── End auto-chunk ──
+
+
     const int kBaseAccessRights = IBV_ACCESS_LOCAL_WRITE |
                                   IBV_ACCESS_REMOTE_WRITE |
                                   IBV_ACCESS_REMOTE_READ;
@@ -306,6 +358,28 @@ int RdmaTransport::unregisterLocalMemory(void *addr, bool update_metadata) {
 int RdmaTransport::unregisterLocalMemoryInternal(void *addr,
                                                  bool update_metadata,
                                                  bool force_sequential) {
+    // ── Auto-unchunk: if this was a chunked registration, unregister all chunks ──
+    {
+        std::vector<void *> chunks;
+        {
+            std::lock_guard<std::mutex> lock(chunked_registrations_mutex_);
+            auto it = chunked_registrations_.find((uintptr_t)addr);
+            if (it != chunked_registrations_.end()) {
+                chunks = std::move(it->second);
+                chunked_registrations_.erase(it);
+            }
+        }
+        if (!chunks.empty()) {
+            int rc = 0;
+            for (auto *ca : chunks) {
+                int r = unregisterLocalMemoryInternal(ca, update_metadata, true);
+                if (r != 0) rc = r;
+            }
+            return rc;
+        }
+    }
+    // ── End auto-unchunk ──
+
     int rc = metadata_->removeLocalMemoryBuffer(addr, update_metadata);
     if (rc) return rc;
 

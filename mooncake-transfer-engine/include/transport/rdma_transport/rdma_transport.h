@@ -127,6 +127,9 @@ class RdmaTransport : public Transport {
                             int &device_id, int retry_cnt = 0);
 
    private:
+    // Track chunked registrations: original addr → list of chunk addrs
+    std::unordered_map<uintptr_t, std::vector<void *>> chunked_registrations_;
+    std::mutex chunked_registrations_mutex_;
     std::vector<std::shared_ptr<RdmaContext>> context_list_;
     std::shared_ptr<Topology> local_topology_;
 };

@@ -213,9 +213,11 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
                                               int access,
                                               MemoryRegionMeta &mrMeta) {
     if (length > (size_t)globalConfig().max_mr_size) {
-        PLOG(WARNING) << "The buffer length exceeds device max_mr_size, "
-                      << "shrink it to " << globalConfig().max_mr_size;
-        length = (size_t)globalConfig().max_mr_size;
+        LOG(ERROR) << "Buffer length " << length
+                   << " exceeds device max_mr_size "
+                   << globalConfig().max_mr_size
+                   << ". Caller must split the buffer into chunks <= max_mr_size.";
+        return ERR_CONTEXT;
     }
 #if !defined(WITH_NVIDIA_PEERMEM) && defined(USE_CUDA)
     // Implement register memory in a way that does not assume the presence of
@@ -313,6 +315,14 @@ int RdmaContext::preTouchMemory(void *addr, size_t length) {
 
 uint32_t RdmaContext::rkey(void *addr) {
     RWSpinlock::ReadGuard guard(memory_regions_lock_);
+    // Prefer exact start-address match. Required for overlapping chunked
+    // registrations: the chunked path passes each chunk's start addr, and a
+    // containment-only lookup would return the first chunk that wraps it,
+    // returning the wrong rkey for later chunks whose start lies inside an
+    // earlier chunk's range.
+    for (auto iter = memory_region_list_.begin();
+         iter != memory_region_list_.end(); ++iter)
+        if (iter->addr == addr) return iter->mr->rkey;
     for (auto iter = memory_region_list_.begin();
          iter != memory_region_list_.end(); ++iter)
         if (iter->addr <= addr &&
@@ -325,6 +335,10 @@ uint32_t RdmaContext::rkey(void *addr) {
 
 uint32_t RdmaContext::lkey(void *addr) {
     RWSpinlock::ReadGuard guard(memory_regions_lock_);
+    // See rkey() above for the exact-match rationale.
+    for (auto iter = memory_region_list_.begin();
+         iter != memory_region_list_.end(); ++iter)
+        if (iter->addr == addr) return iter->mr->lkey;
     for (auto iter = memory_region_list_.begin();
          iter != memory_region_list_.end(); ++iter)
         if (iter->addr <= addr &&
@@ -649,6 +663,36 @@ int RdmaContext::openRdmaDevice(const std::string &device_name, uint8_t port,
         active_mtu_ = attr.active_mtu;
         active_speed_ = attr.active_speed;
         gid_index_ = gid_index;
+
+        // ── Clamp RDMA Read/Atomic limits to device caps ──
+        // IB spec: sum of max_dest_rd_atomic across all QPs of this device
+        // must not exceed device_attr.max_res_rd_atom. AMD ionic advertises
+        // max_res_rd_atom = 16 (vs 2048+ on Mellanox), so the historical
+        // hardcoded value of 16 per QP exhausts device responder resources
+        // after the first QP and subsequent ibv_modify_qp(RTR) returns EINVAL.
+        {
+            uint32_t res = device_attr.max_res_rd_atom;
+            uint32_t per_qp = res / 16;            // budget for ~16 active QPs
+            if (per_qp == 0) per_qp = 1;
+            if (per_qp > 16)  per_qp = 16;
+            if (per_qp > device_attr.max_qp_rd_atom)
+                per_qp = device_attr.max_qp_rd_atom;
+            max_dest_rd_atomic_ = (uint8_t)per_qp;
+
+            uint32_t init = 16;
+            if (init > device_attr.max_qp_init_rd_atom)
+                init = device_attr.max_qp_init_rd_atom;
+            max_rd_atomic_ = (uint8_t)init;
+
+            LOG(INFO) << "RDMA " << device_name
+                      << " rd_atomic clamp: max_dest_rd_atomic="
+                      << (int)max_dest_rd_atomic_
+                      << ", max_rd_atomic=" << (int)max_rd_atomic_
+                      << " (device max_res_rd_atom=" << res
+                      << ", max_qp_rd_atom=" << device_attr.max_qp_rd_atom
+                      << ", max_qp_init_rd_atom="
+                      << device_attr.max_qp_init_rd_atom << ")";
+        }
 
         ibv_free_device_list(devices);
         return 0;
